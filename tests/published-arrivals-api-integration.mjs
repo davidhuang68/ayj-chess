@@ -1,0 +1,23 @@
+// Local disposable QA database only.
+import assert from 'node:assert/strict';
+import {calculateStats} from '../lib/chess.ts';
+const base='http://localhost:5173';
+const request=async(path,{body,cookie=''}={})=>{const r=await fetch(base+path,{method:body?'POST':'GET',headers:{...(cookie?{Cookie:cookie}:{}),...(body?{'Content-Type':'application/json',Origin:base}:{})},...(body?{body:JSON.stringify(body)}:{})});return {status:r.status,data:await r.json(),cookie:r.headers.getSetCookie().filter(x=>x.startsWith('boardroom_session_dev=')).map(x=>x.split(';')[0]).join('; ')};};
+const login=await request('/api/auth',{body:{action:'login',username:'qa-delete-manager',password:'Local-Delete-QA-Password-Only!'}});assert.equal(login.status,200);const cookie=login.cookie;
+let state=(await request('/api/club',{cookie})).data;assert.ok(state.club.name.startsWith('Local QA'));assert.ok(!state.club.tournaments.some(t=>t.status!=='completed'));
+const before=calculateStats(state.club),prefix='Arrival QA '+crypto.randomUUID().slice(0,6),created=[];
+const save=async action=>{const r=await request('/api/club',{cookie,body:{version:state.version,action}});assert.equal(r.status,200,JSON.stringify(r.data));state=r.data;};
+await save({type:'createSession',name:'Local QA Published Arrivals',date:state.club.tournaments.at(-1)?.date??'2026-10-16',timeControl:'10 min',maxRounds:1});const id=state.club.tournaments.at(-1).id;
+await save({type:'importNames',tournamentId:id,mode:'new',text:prefix+' Base A\n'+prefix+' Base B'});created.push(...state.club.tournaments.at(-1).roster);
+await save({type:'publishRound',tournamentId:id});const g=state.club.tournaments.at(-1).rounds[0].games[0];
+await save({type:'result',tournamentId:id,round:1,gameId:g.id,result:'draw'});const games=structuredClone(state.club.tournaments.at(-1).rounds[0].games),stats=calculateStats(state.club);
+await save({type:'importNames',tournamentId:id,mode:'new',text:prefix+' Late A\n'+prefix+' Late B\n'+prefix+' Late C',initialRatings:[{name:prefix+' Late A',rating:1700}]});
+state=(await request('/api/club',{cookie})).data;let r=state.club.tournaments.at(-1).rounds[0];created.push(...r.unpaired);
+assert.equal(r.unpaired.length,3);assert.deepEqual(r.games,games);for(const pid of Object.keys(stats))assert.deepEqual(calculateStats(state.club)[pid],stats[pid]);
+assert.equal(calculateStats(state.club)[r.unpaired[0]].rating,1700);
+await save({type:'importNames',tournamentId:id,mode:'existing',text:prefix+' Late A'});assert.equal(state.club.tournaments.at(-1).rounds[0].unpaired.length,3);
+await save({type:'pairWaiting',tournamentId:id,round:1});r=state.club.tournaments.at(-1).rounds[0];assert.equal(r.games.length,2);assert.equal(r.unpaired.length,1);assert.ok(r.games.every(game=>game.black));assert.deepEqual(r.games.find(game=>game.id===g.id),games[0]);
+await save({type:'attendance',tournamentId:id,playerId:r.unpaired[0],present:false});const lateGame=state.club.tournaments.at(-1).rounds[0].games.find(game=>game.id!==g.id);
+await save({type:'result',tournamentId:id,round:1,gameId:lateGame.id,result:'draw'});await save({type:'finishSession',tournamentId:id});
+for(const pid of created)await save({type:'deletePlayer',playerId:pid,confirm:true});assert.deepEqual(calculateStats(state.club),before);
+console.log('PASS: manager adds rated arrivals after the final round is published; waiting state persists, repeats do not duplicate entries, pair-waiting preserves recorded games and leaves one waiting without a bye.');

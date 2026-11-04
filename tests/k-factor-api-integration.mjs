@@ -1,0 +1,20 @@
+// Disposable local QA database only.
+import assert from 'node:assert/strict';
+import {calculateStats} from '../lib/chess.ts';
+const base='http://localhost:5173';
+const request=async(path,{body,cookie=''}={})=>{const r=await fetch(base+path,{method:body?'POST':'GET',headers:{...(cookie?{Cookie:cookie}:{}),...(body?{'Content-Type':'application/json',Origin:base}:{})},...(body?{body:JSON.stringify(body)}:{})});return {status:r.status,data:await r.json(),cookie:r.headers.getSetCookie().filter(x=>x.startsWith('boardroom_session_dev=')).map(x=>x.split(';')[0]).join('; ')};};
+const login=await request('/api/auth',{body:{action:'login',username:'qa-owner',password:'Local-Owner-QA-Password-Only!'}});assert.equal(login.status,200);const cookie=login.cookie;
+let snapshot=(await request('/api/club',{cookie})).data;assert.ok(snapshot.club.name.startsWith('Local QA'));assert.ok(!snapshot.club.tournaments.some(t=>t.status!=='completed'));
+const save=async(action,version=snapshot.version)=>{const r=await request('/api/club',{cookie,body:{version,action}});if(r.status===200)snapshot=r.data;return r;};
+const settings=k=>({type:'settings',name:snapshot.club.name,startingRating:snapshot.club.startingRating,kFactor:k});
+const originalK=snapshot.club.kFactor,originalStats=calculateStats(snapshot.club),oldVersion=snapshot.version;
+assert.equal((await save({type:'createSession',name:'Local QA Editable K',date:snapshot.club.tournaments.at(-1)?.date??'2026-10-12',timeControl:'10 + 5',kFactor:64})).status,200);assert.equal(snapshot.club.kFactor,64);assert.deepEqual(calculateStats(snapshot.club),originalStats);assert.equal((await save(settings(8),oldVersion)).status,409);assert.equal((await save(settings(65))).status,400);const id=snapshot.club.tournaments.at(-1).id;
+assert.equal((await save({type:'importNames',tournamentId:id,mode:'new',text:Array.from({length:4},(_,n)=>`K QA ${crypto.randomUUID()} ${n}`).join('\n')})).status,200);assert.equal((await save({type:'publishRound',tournamentId:id})).status,200);
+const games=snapshot.club.tournaments.at(-1).rounds[0].games,initial=calculateStats(snapshot.club),score=(game,result)=>({type:'result',tournamentId:id,round:1,gameId:game.id,result});
+assert.equal((await save(score(games[0],'white'))).status,200);assert.equal(calculateStats(snapshot.club)[games[0].white].rating,initial[games[0].white].rating+32);
+const before=calculateStats(snapshot.club);assert.equal((await save(settings(8))).status,200);assert.deepEqual(calculateStats(snapshot.club),before);
+assert.equal((await save(score(games[1],'white'))).status,200);assert.equal(calculateStats(snapshot.club)[games[1].white].rating,initial[games[1].white].rating+4);
+snapshot=(await request('/api/club',{cookie})).data;const round=snapshot.club.tournaments.at(-1).rounds[0];assert.equal(round.games[0].kFactor,64);assert.equal(round.games[1].kFactor,8);
+assert.equal((await save(score(games[0],'black'))).status,200);assert.equal(calculateStats(snapshot.club)[games[0].white].rating,initial[games[0].white].rating-32);
+assert.equal((await save({type:'finishSession',tournamentId:id,confirmEarly:true})).status,200);const finalStats=calculateStats(snapshot.club);assert.equal((await save(settings(originalK))).status,200);assert.deepEqual(calculateStats(snapshot.club),finalStats);
+console.log('PASS: editable K persists, preserves old ratings, applies to new results, retains the original factor for corrections, and rejects stale/invalid saves.');

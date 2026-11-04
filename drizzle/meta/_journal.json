@@ -1,0 +1,27 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1791688835682,
+      "tag": "0000_sleepy_madame_hydra",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1791690654314,
+      "tag": "0001_fuzzy_forgotten_one",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1791691588241,
+      "tag": "0002_regular_living_tribunal",
+      "breakpoints": true
+    }
+  ]
+}

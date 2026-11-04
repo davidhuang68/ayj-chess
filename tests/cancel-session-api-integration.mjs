@@ -1,0 +1,22 @@
+// Disposable localhost QA database only.
+import assert from 'node:assert/strict';
+import {calculateStats} from '../lib/chess.ts';
+const base='http://localhost:5173';
+const request=async(path,{body,cookie=''}={})=>{const r=await fetch(base+path,{method:body?'POST':'GET',headers:{...(cookie?{Cookie:cookie}:{}),...(body?{'Content-Type':'application/json',Origin:base}:{})},...(body?{body:JSON.stringify(body)}:{})});return {status:r.status,data:await r.json(),cookie:r.headers.getSetCookie().filter(x=>x.startsWith('boardroom_session_dev=')).map(x=>x.split(';')[0]).join('; ')};};
+const login=await request('/api/auth',{body:{action:'login',username:'qa-delete-manager',password:'Local-Delete-QA-Password-Only!'}});assert.equal(login.status,200);const cookie=login.cookie;
+let snapshot=(await request('/api/club',{cookie})).data;assert.ok(snapshot.club.name.startsWith('Local QA'));assert.ok(!snapshot.club.tournaments.some(t=>t.status!=='completed'));assert.equal(snapshot.user.role,'manager');
+const save=async(action,version=snapshot.version)=>{const r=await request('/api/club',{cookie,body:{version,action}});if(r.status===200)snapshot=r.data;return r;};
+const before=structuredClone(snapshot.club),stats=calculateStats(before),create={type:'createSession',name:'Local QA Cancel Session',date:before.tournaments.at(-1)?.date??'2026-10-14',timeControl:'10 + 5'};
+assert.equal((await save(create)).status,200);const id=snapshot.club.tournaments.at(-1).id;
+assert.equal((await save({type:'importNames',tournamentId:id,mode:'existing',text:before.players.slice(0,4).map(p=>p.name).join('\n')})).status,200);
+const oldVersion=snapshot.version;assert.equal((await save({type:'cancelSession',tournamentId:id})).status,400);
+assert.equal((await save({type:'cancelSession',tournamentId:id,confirm:true})).status,200);
+snapshot=(await request('/api/club',{cookie})).data;assert.deepEqual(snapshot.club.players,before.players);assert.deepEqual(snapshot.club.tournaments,before.tournaments);assert.deepEqual(calculateStats(snapshot.club),stats);
+assert.equal((await save(create)).status,200);const next=snapshot.club.tournaments.at(-1).id;
+assert.equal((await save({type:'cancelSession',tournamentId:next,confirm:true},oldVersion)).status,409);
+assert.equal((await save({type:'importNames',tournamentId:next,mode:'existing',text:before.players.slice(0,4).map(p=>p.name).join('\n')})).status,200);assert.equal((await save({type:'publishRound',tournamentId:next})).status,200);
+assert.equal((await save({type:'cancelSession',tournamentId:next,confirm:true})).status,400);
+assert.equal((await request('/api/club',{body:{version:snapshot.version,action:{type:'cancelSession',tournamentId:next,confirm:true}}})).status,401);
+for(const game of snapshot.club.tournaments.at(-1).rounds[0].games)assert.equal((await save({type:'result',tournamentId:next,round:1,gameId:game.id,result:'draw'})).status,200);
+assert.equal((await save({type:'finishSession',tournamentId:next,confirmEarly:true})).status,200);
+console.log('PASS: manager cancellation persists, players/history/ratings remain intact, another session can start, and published/stale/anonymous/unconfirmed cancellations are rejected.');

@@ -1,0 +1,20 @@
+// Local disposable QA database only; never use production credentials or URLs.
+import assert from 'node:assert/strict';
+import {calculateStats} from '../lib/chess.ts';
+const base='http://localhost:5173';
+const request=async(path,{body,cookie=''}={})=>{const r=await fetch(base+path,{method:body?'POST':'GET',headers:{...(cookie?{Cookie:cookie}:{}),...(body?{'Content-Type':'application/json',Origin:base}:{})},...(body?{body:JSON.stringify(body)}:{})});return {status:r.status,data:await r.json(),cookie:r.headers.getSetCookie().filter(x=>x.startsWith('boardroom_session_dev=')).map(x=>x.split(';')[0]).join('; ')};};
+const login=await request('/api/auth',{body:{action:'login',username:'qa-delete-manager',password:'Local-Delete-QA-Password-Only!'}});assert.equal(login.status,200);const cookie=login.cookie;
+let state=(await request('/api/club',{cookie})).data;assert.ok(state.club.name.startsWith('Local QA'));assert.equal(state.user.role,'manager');assert.ok(!state.club.tournaments.some(t=>t.status!=='completed'));
+const before=calculateStats(state.club),prefix='Rating QA '+crypto.randomUUID().slice(0,6);
+const save=async(action)=>{const r=await request('/api/club',{cookie,body:{version:state.version,action}});if(r.status===200)state=r.data;return r;};
+assert.equal((await save({type:'createSession',name:'Local QA Initial Ratings',date:state.club.tournaments.at(-1)?.date??'2026-10-16',timeControl:'10 min'})).status,200);const id=state.club.tournaments.at(-1).id;
+const version=state.version;
+assert.equal((await save({type:'importNames',tournamentId:id,mode:'new',text:prefix+' Invalid',initialRatings:[{name:prefix+' Invalid',rating:3501}]})).status,400);assert.equal(state.version,version);
+assert.equal((await save({type:'importNames',tournamentId:id,mode:'new',text:prefix+' Rated\n'+prefix+' Default',initialRatings:[{name:prefix+' Rated',rating:1700}]})).status,200);
+state=(await request('/api/club',{cookie})).data;
+const rated=state.club.players.find(p=>p.name===prefix+' Rated'),defaulted=state.club.players.find(p=>p.name===prefix+' Default');
+assert.equal(rated.initialRating,1700);assert.equal(defaulted.initialRating,state.club.startingRating);assert.equal(calculateStats(state.club)[rated.id].rating,1700);assert.ok(!state.club.players.some(p=>p.name===prefix+' Invalid'));
+assert.equal((await save({type:'importNames',tournamentId:id,mode:'existing',text:rated.name,initialRatings:[{name:rated.name,rating:500}]})).status,400);
+for(const player of [rated,defaulted])assert.equal((await save({type:'deletePlayer',playerId:player.id,confirm:true})).status,200);
+assert.equal((await save({type:'cancelSession',tournamentId:id,confirm:true})).status,200);assert.deepEqual(calculateStats(state.club),before);
+console.log('PASS: manager-supplied starting ratings persist, blank ratings use the default, invalid batches and existing-player reseeding are rejected, and original player ratings are unchanged.');

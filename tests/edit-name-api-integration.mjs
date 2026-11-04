@@ -1,0 +1,24 @@
+// Disposable local QA database only; does not accept a production address.
+import assert from 'node:assert/strict';
+import {calculateStats} from '../lib/chess.ts';
+const base='http://localhost:5173';
+const request=async(path,{body,cookie=''}={})=>{const r=await fetch(base+path,{method:body?'POST':'GET',headers:{...(cookie?{Cookie:cookie}:{}),...(body?{'Content-Type':'application/json',Origin:base}:{})},...(body?{body:JSON.stringify(body)}:{})});return {status:r.status,data:await r.json(),cookie:r.headers.getSetCookie().filter(x=>x.startsWith('boardroom_session_dev=')).map(x=>x.split(';')[0]).join('; ')};};
+const login=async(username,password)=>{const r=await request('/api/auth',{body:{action:'login',username,password}});assert.equal(r.status,200);return r.cookie;};
+const owner=await login('qa-owner','Local-Owner-QA-Password-Only!'),manager=await login('qa-delete-manager','Local-Delete-QA-Password-Only!');
+let state=(await request('/api/club',{cookie:owner})).data;assert.ok(state.club.name.startsWith('Local QA'));assert.ok(!state.club.tournaments.some(t=>t.status!=='completed'));
+const before=calculateStats(state.club),prefix='Rename QA '+crypto.randomUUID().slice(0,6);
+const save=async action=>{const r=await request('/api/club',{cookie:owner,body:{version:state.version,action}});assert.equal(r.status,200,JSON.stringify(r.data));state=r.data;};
+await save({type:'createSession',name:'Local QA Rename',date:state.club.tournaments.at(-1)?.date??'2026-10-22',timeControl:'10 min',maxRounds:1});const id=state.club.tournaments.at(-1).id;
+await save({type:'importNames',tournamentId:id,mode:'new',text:prefix+' Old\n'+prefix+' Other'});const ids=[...state.club.tournaments.at(-1).roster];
+await save({type:'publishRound',tournamentId:id});const g=state.club.tournaments.at(-1).rounds[0].games[0];await save({type:'result',tournamentId:id,round:1,gameId:g.id,result:'draw'});
+const stats=calculateStats(state.club),games=structuredClone(state.club.tournaments),target=ids[0],version=state.version;
+const denied=await request('/api/club',{cookie:manager,body:{version,action:{type:'editName',playerId:target,name:prefix+' Manager'}}});assert.equal(denied.status,400);assert.match(denied.data.error,/Only the admin/);
+const duplicate=await request('/api/club',{cookie:owner,body:{version,action:{type:'editName',playerId:target,name:prefix+' Other'}}});assert.equal(duplicate.status,400);
+const anon=await request('/api/club',{body:{version,action:{type:'editName',playerId:target,name:prefix+' Anonymous'}}});assert.equal(anon.status,401);
+await save({type:'editName',playerId:target,name:prefix+' Corrected'});state=(await request('/api/club',{cookie:owner})).data;
+assert.equal(state.club.players.find(p=>p.id===target).name,prefix+' Corrected');assert.deepEqual(calculateStats(state.club),stats);assert.deepEqual(state.club.tournaments,games);
+assert.equal(state.club.audit[0].action,'editName');assert.equal(state.club.audit[0].actor,'qa-owner');assert.ok(state.club.audit[0].detail.includes(prefix+' Old'));assert.ok(state.club.audit[0].detail.includes(prefix+' Corrected'));
+const stale=await request('/api/club',{cookie:owner,body:{version,action:{type:'editName',playerId:target,name:prefix+' Stale'}}});assert.equal(stale.status,409);
+const visible=(await request('/api/club',{cookie:manager})).data;assert.deepEqual(visible.club.audit,[]);assert.equal(visible.club.players.find(p=>p.id===target).name,prefix+' Corrected');
+await save({type:'finishSession',tournamentId:id});for(const pid of ids)await save({type:'deletePlayer',playerId:pid,confirm:true});assert.deepEqual(calculateStats(state.club),before);
+console.log('PASS: admin rename persists with the same identity and history, managers/anonymous users cannot rename, duplicates/stale writes are rejected, and old/new names appear in the admin audit log.');

@@ -1,0 +1,26 @@
+// Local disposable QA database only.
+import assert from 'node:assert/strict';
+import {calculateStats} from '../lib/chess.ts';
+const base='http://localhost:5173';
+const request=async(path,{body,cookie=''}={})=>{const r=await fetch(base+path,{method:body?'POST':'GET',headers:{...(cookie?{Cookie:cookie}:{}),...(body?{'Content-Type':'application/json',Origin:base}:{})},...(body?{body:JSON.stringify(body)}:{})});return {status:r.status,data:await r.json(),cookie:r.headers.getSetCookie().filter(x=>x.startsWith('boardroom_session_dev=')).map(x=>x.split(';')[0]).join('; ')};};
+const auth=(body,cookie)=>request('/api/auth',{body,cookie});
+const login=await auth({action:'login',username:'qa-owner',password:'Local-Owner-QA-Password-Only!'});assert.equal(login.status,200);const admin=login.cookie;
+let snapshot=(await request('/api/club',{cookie:admin})).data;assert.ok(snapshot.club.name.startsWith('Local QA'));assert.ok(!snapshot.club.tournaments.some(t=>t.status!=='completed'));
+const accounts=(await request('/api/auth',{cookie:admin})).data.accounts;
+if(!accounts.some(a=>a.username==='qa-delete-manager'))assert.equal((await auth({action:'createAccount',username:'qa-delete-manager',password:'Local-Delete-QA-Password-Only!'},admin)).status,200);
+const manager=await auth({action:'login',username:'qa-delete-manager',password:'Local-Delete-QA-Password-Only!'});assert.equal(manager.status,200);const cookie=manager.cookie;
+snapshot=(await request('/api/club',{cookie})).data;assert.equal(snapshot.user.role,'manager');
+const save=async(action,version=snapshot.version)=>{const r=await request('/api/club',{cookie,body:{version,action}});if(r.status===200)snapshot=r.data;return r;};
+assert.equal((await save({type:'createSession',name:'Local QA Delete Players',date:snapshot.club.tournaments.at(-1)?.date??'2026-10-14',timeControl:'10 + 5'})).status,200);const id=snapshot.club.tournaments.at(-1).id,prefix='Delete QA '+crypto.randomUUID().slice(0,6);
+assert.equal((await save({type:'importNames',tournamentId:id,mode:'new',text:Array.from({length:8},(_,n)=>prefix+' '+n).join('\n')})).status,200);assert.equal((await save({type:'publishRound',tournamentId:id})).status,200);
+let round=snapshot.club.tournaments.at(-1).rounds[0];const games=structuredClone(round.games),score=g=>({type:'result',tournamentId:id,round:1,gameId:g.id,result:'white'});
+assert.equal((await save(score(games[0]))).status,200);const before=calculateStats(snapshot.club),recorded=structuredClone(snapshot.club.tournaments.at(-1).rounds[0].games[0]),version=snapshot.version;
+assert.equal((await save({type:'deletePlayer',playerId:games[0].white})).status,400);assert.equal(snapshot.version,version);
+assert.equal((await save({type:'deletePlayer',playerId:games[0].white,confirm:true})).status,200);
+snapshot=(await request('/api/club',{cookie})).data;assert.ok(!snapshot.club.players.some(p=>p.id===games[0].white));for(const p of snapshot.club.players)assert.deepEqual(calculateStats(snapshot.club)[p.id],before[p.id]);assert.deepEqual(snapshot.club.tournaments.at(-1).rounds[0].games.find(g=>g.id===recorded.id),recorded);
+assert.equal((await save({...score(games[0]),result:'black'})).status,400);assert.equal((await save({type:'deletePlayer',playerId:games[1].white,confirm:true},version)).status,409);assert.ok(snapshot.club.players.some(p=>p.id===games[1].white));
+assert.equal((await save({type:'deletePlayer',playerId:games[1].white,confirm:true})).status,200);assert.deepEqual(snapshot.club.tournaments.at(-1).rounds[0].unpaired,[games[1].black]);
+assert.equal((await save({type:'deletePlayer',playerId:games[1].black,confirm:true})).status,200);assert.deepEqual(snapshot.club.tournaments.at(-1).rounds[0].unpaired,[]);
+for(const g of snapshot.club.tournaments.at(-1).rounds[0].games.filter(g=>!g.result))assert.equal((await save(score(g))).status,200);assert.equal((await save({type:'finishSession',tournamentId:id,confirmEarly:true})).status,200);
+assert.equal((await request('/api/club',{body:{version:snapshot.version,action:{type:'deletePlayer',playerId:games[2].white,confirm:true}}})).status,401);
+console.log('PASS: a tournament manager can delete profiles with confirmation; ratings/history persist unchanged, pending opponents wait, and stale/anonymous/unconfirmed writes are rejected.');

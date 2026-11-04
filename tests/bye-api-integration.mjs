@@ -1,0 +1,31 @@
+// Disposable local QA database only.
+import assert from 'node:assert/strict';
+import {calculateStats} from '../lib/chess.ts';
+const base='http://localhost:5173';
+const request=async(path,{body,cookie=''}={})=>{
+ const r=await fetch(base+path,{method:body?'POST':'GET',headers:{...(cookie?{Cookie:cookie}:{}),...(body?{'Content-Type':'application/json',Origin:base}:{})},...(body?{body:JSON.stringify(body)}:{})});
+ return {status:r.status,data:await r.json(),cookie:r.headers.getSetCookie().filter(x=>x.startsWith('boardroom_session_dev=')).map(x=>x.split(';')[0]).join('; ')};
+};
+const login=await request('/api/auth',{body:{action:'login',username:'qa-owner',password:'Local-Owner-QA-Password-Only!'}});assert.equal(login.status,200);const cookie=login.cookie;
+let snapshot=(await request('/api/club',{cookie})).data;
+assert.ok(snapshot.club.name.startsWith('Local QA'),'Preserve non-QA data');assert.ok(!snapshot.club.tournaments.some(t=>t.status!=='completed'),'Preserve active sessions');
+const save=async(action,version=snapshot.version)=>{const r=await request('/api/club',{cookie,body:{version,action}});if(r.status===200)snapshot=r.data;return r;};
+assert.equal((await save({type:'createSession',name:'Local QA Assign Bye',date:snapshot.club.tournaments.at(-1)?.date??'2026-10-12',timeControl:'10 + 5'})).status,200);
+const id=snapshot.club.tournaments.at(-1).id;
+assert.equal((await save({type:'importNames',tournamentId:id,mode:'existing',text:snapshot.club.players.slice(0,6).map(p=>p.name).join('\n')})).status,200);
+assert.equal((await save({type:'publishRound',tournamentId:id})).status,200);
+let round=snapshot.club.tournaments.at(-1).rounds[0];const recorded=round.games[0],missing=round.games[1];
+assert.equal((await save({type:'result',tournamentId:id,round:1,gameId:recorded.id,result:'draw'})).status,200);
+assert.equal((await save({type:'attendance',tournamentId:id,playerId:missing.white,present:false})).status,200);
+round=snapshot.club.tournaments.at(-1).rounds[0];const boards=structuredClone(round.games),before=calculateStats(snapshot.club),version=snapshot.version;
+assert.equal((await save({type:'assignBye',tournamentId:id,round:1,playerId:missing.white})).status,400);assert.equal(snapshot.version,version);
+assert.equal((await save({type:'assignBye',tournamentId:id,round:1,playerId:missing.black})).status,200);
+assert.equal((await save({type:'assignBye',tournamentId:id,round:1,playerId:missing.black},version)).status,409);
+snapshot=(await request('/api/club',{cookie})).data;round=snapshot.club.tournaments.at(-1).rounds[0];const after=calculateStats(snapshot.club),bye=round.games.find(g=>g.black===null);
+assert.equal(bye.white,missing.black);assert.equal(bye.result,'bye');assert.deepEqual(round.unpaired,[]);
+for(const board of boards)assert.deepEqual(round.games.find(g=>g.id===board.id),board);
+assert.equal(after[missing.black].points,before[missing.black].points+1);assert.equal(after[missing.black].rating,before[missing.black].rating);assert.equal(after[missing.black].games,before[missing.black].games);assert.deepEqual(after[missing.black].history,before[missing.black].history);
+assert.equal((await save({type:'assignBye',tournamentId:id,round:1,playerId:missing.black})).status,400);
+for(const game of round.games.filter(g=>!g.result))assert.equal((await save({type:'result',tournamentId:id,round:1,gameId:game.id,result:'white'})).status,200);
+assert.equal((await save({type:'finishSession',tournamentId:id,confirmEarly:true})).status,200);
+console.log('PASS: direct bye persists, awards one point with unchanged Elo, preserves other boards/results, and rejects invalid/stale requests.');
